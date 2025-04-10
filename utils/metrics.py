@@ -1,4 +1,6 @@
+import torch
 import numpy as np
+from .fsim import FSIM
 from scipy.signal import convolve2d
 from scipy.ndimage import gaussian_filter
 
@@ -103,4 +105,65 @@ def MPSNR_case3(Y, Y_ref):
             k_tmp[i] = 10 * np.log10(max_y ** 2 / mse)
     k = np.mean(k_tmp)
     return k
+
+
+def SAM(Y, Y_ref, eps=2.2204e-16):
+    """Calculate the Spectral Angle Mapper (SAM) between two HSIs."""
+    assert Y.ndim == 2 and Y.shape == Y_ref.shape
+    Y = Y.T
+    Y_ref = Y_ref.T
+    core = np.multiply(Y, Y_ref)
+    mole = np.sum(core, axis=1)
+    im1_norm = np.sqrt(np.sum(np.square(Y), axis=1))
+    im2_norm = np.sqrt(np.sum(np.square(Y_ref), axis=1))
+    deno = np.multiply(im1_norm, im2_norm)
+    sam = np.rad2deg(np.arccos(((mole + eps) / (deno + eps)).clip(-1, 1)))
+    return np.mean(sam)
+
+
+def ERGAS(Y, Y_ref, row, column):
+    """Calculate the Error Relative Global Dimensionless Synthesis (ERGAS) between two HSIs."""
+    assert Y.ndim == 2 and Y.shape == Y_ref.shape
+    band, _ = Y_ref.shape
+    ergas_numerator = 0
+    for i in range(band):
+        ref_band = Y_ref[i, :].reshape(row, column)
+        pro_band = Y[i, :].reshape(row, column)
+        mse = np.mean((ref_band - pro_band) ** 2)
+        N = np.std(ref_band)
+        if N == 0:
+            ergas_numerator += 0  # 如果标准差为零，跳过该波段
+        else:
+            ergas_numerator += mse / (N ** 2)
+    ergas = 100 * np.sqrt(ergas_numerator / band)
+    return ergas
+
+
+def MFSIM(Y, Y_ref, row, column):
+    """Calculate the Mean Fusion Structural Similarity Index (MFSIM) between two HSIs.
+
+    Parameters:
+        Y (numpy.ndarray): Array of shape (band, row * column).
+        Y_ref (numpy.ndarray): Reference array of shape (band, row * column).
+        row (int): Number of rows in the HSI.
+        column (int): Number of columns in the HSI.
+
+    Returns:
+        float: Mean Fusion Structural Similarity Index.
+    """
+    assert Y.ndim == 2 and Y.shape == Y_ref.shape
+    band, _ = Y.shape
+    fsims = []
+    FSIM_loss = FSIM()
+    for i in range(band):
+        ref_band = Y_ref[i, :].reshape(row, column)
+        Y_i = Y[i, :].reshape(row, column)
+        img1 = torch.from_numpy(ref_band).float().unsqueeze(0).unsqueeze(0)
+        img2 = torch.from_numpy(Y_i).float().unsqueeze(0).unsqueeze(0)
+        if torch.cuda.is_available():
+            img1 = img1.cuda()
+            img2 = img2.cuda()
+        fsim_value = FSIM_loss(img1, img2)
+        fsims.append(fsim_value.item())
+    return np.mean(fsims)
 

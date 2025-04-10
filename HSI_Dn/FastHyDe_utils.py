@@ -47,7 +47,7 @@ def estimate_n_eims(cfg, n_hsi, E, Rw, row, column):
     return n_eims_Y, n_eims, sigmas
 
 
-def denoise_eims(cfg, n_eims_Y, E, Rw, row, column, sigmas):
+def denoise_eims(cfg, n_eims_Y, row, column, sigmas):
     """Denoise eigenimages using a pre-trained denoiser."""
     d_eims_Y = []
     for i in range(cfg.p_subspace):

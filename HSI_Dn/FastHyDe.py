@@ -17,7 +17,7 @@ def FastHyDe(cfg, n_hsi):
     n_eims_Y, n_eims, sigmas = estimate_n_eims(cfg, n_hsi, E, Rw, row, column)
 
     # Denoise eigenimages
-    d_eims_Y = denoise_eims(cfg, n_eims_Y, E, Rw, row, column, sigmas)
+    d_eims_Y = denoise_eims(cfg, n_eims_Y, row, column, sigmas)
 
     # Reconstruct HSI
     d_hsi = np.dot(E, d_eims_Y)
