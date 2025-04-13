@@ -7,7 +7,7 @@ import numpy as np
 from .log import init_logger
 from easydict import EasyDict
 from .add_noise import add_noise
-from .save_data import save_metrics_data
+from .save_data import metrics_data_in_paper, mkdir
 from .utils_image import load_clean_HSI, normalize_img
 from .metrics import MSSIM, MPSNR, MPSNR_case3, SAM, ERGAS, MFSIM
 

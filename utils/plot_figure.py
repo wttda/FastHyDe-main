@@ -1,6 +1,8 @@
 import logging
+import imageio
 import numpy as np
 import matplotlib.pyplot as plt
+from utils import mkdir
 logger = logging.getLogger(__name__)
 font = {'family': 'serif',
         'serif': 'Times New Roman',
@@ -23,8 +25,8 @@ def plt_result_2(cfg, figdata, row, column, psnr_values, mssim_values, times, in
         if i == 0:
             plt.title(f'Running {cfg.datasets.scene_name} data\n{titles[i]}\n{cfg.band_show}th band')
         else:
-            strtmp1 = f'MPSNR: {psnr_values[i]:.4f} dB'
-            strtmp2 = f'MSSIM: {mssim_values[i]:.4f}'
+            strtmp1 = f'MPSNR: {psnr_values[i-1]:.4f} dB'
+            strtmp2 = f'MSSIM: {mssim_values[i-1]:.4f}'
             if i == 1:
                 plt.title(f'{titles[i]}\n{info_noise}\n{strtmp1}\n{strtmp2}')
             else:
@@ -65,5 +67,49 @@ def imshow(images, titles=None, cbar=False, figsize=(18, 6), axis=False, save_pa
     if show:
         plt.show()
     plt.close()
+
+
+def fig_in_paper(cfg, d_hsi_Y, row, column):
+    """Plot and save images for a specific band and create GIF animations for the entire HSI."""
+    noise_level_str = str(cfg.datasets.noise_level).replace('.', '')
+    case_dir = f'case1_{noise_level_str}' if cfg.datasets.noise_case == 'case1' else 'case2'
+    save_dir = f'{cfg.paper_fig_save_dir}/{cfg.datasets.scene_name}/{case_dir}'
+    mkdir(save_dir)
+
+    def save_image(image, path, title):
+        imshow(image, figsize=(6, 6), axis=False, show=cfg.show_figure, save_path=path)
+        if path:
+            logger.info(f"Saved {title} to {path}")
+    save_dir_band = f'{save_dir}/Band_{cfg.band_show}'
+    mkdir(save_dir_band)
+    d_save_path = f'{save_dir_band}/{cfg.algorithm_name}.png' if cfg.save_figure else None
+    save_image(d_hsi_Y[cfg.band_show].reshape(row, column, order='F'), d_save_path,
+               f"denoised HSI for band{cfg.band_show}")
+
+    def create_pseudo_color_image(hsi_Y, bands):
+        band1 = hsi_Y[bands[0]].reshape(row, column, order='F')
+        band2 = hsi_Y[bands[1]].reshape(row, column, order='F')
+        band3 = hsi_Y[bands[2]].reshape(row, column, order='F')
+        return np.clip(np.dstack((band1, band2, band3)), 0, 1)
+    save_dir_pseudo_color = f'{save_dir}/PseudoImage'
+    mkdir(save_dir_pseudo_color)
+    d_save_path = f'{save_dir_pseudo_color}/{cfg.algorithm_name}.png' if cfg.save_figure else None
+    pseudo_color_d = create_pseudo_color_image(d_hsi_Y, cfg.selected_bands)
+    save_image(pseudo_color_d, d_save_path, f"denoised pseudo-color HSI for bands{cfg.selected_bands}")
+
+    def create_frames(hsi_Y):
+        frames = []
+        for band in range(hsi_Y.shape[0]):
+            frame = hsi_Y[band].reshape(row, column, order='F')
+            frame = np.clip(frame, 0, 1)  # Ensure frame is in [0, 1] range
+            frames.append((frame * 255).astype(np.uint8))  # Convert to uint8 for imageio
+        return frames
+    save_dir_GIF = f'{save_dir}/GIF'
+    mkdir(save_dir_GIF)
+    d_save_path = f'{save_dir_GIF}/{cfg.algorithm_name}.gif' if cfg.save_figure else None
+    d_frames = create_frames(d_hsi_Y)
+    if cfg.save_figure:
+        imageio.mimsave(d_save_path, d_frames, fps=10)
+        logger.info(f"Saved denoised GIF animation to {d_save_path}")
 
 

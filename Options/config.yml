@@ -14,10 +14,12 @@ datasets:
 # save and show
 save_result: True
 save_dir: ./Results/
-metric_save_dir: ../metrics.csv
+paper_fig_save_dir: ../Results
+paper_metric_save_dir: ../Results/metrics.csv
 log_file_name: log.txt
 plt_figure: True
 band_show: 50
+selected_bands: [49, 27, 7]
 show_figure: False
 save_figure: True
 
