@@ -3,17 +3,13 @@ import numpy as np
 from HSI_Dn.FastHyDe import FastHyDe
 from utils.plot_figure import plt_result_2, fig_in_paper
 from utils import (
-    set_seed, Config, MSSIM, MPSNR, MPSNR_case3, SAM, ERGAS, MFSIM,
+    set_seed, Config, MSSIM, MPSNR, MPSNR_case3, MSAM, ERGAS, MFSIM,
     init_logger, load_clean_HSI, add_noise, metrics_data_in_paper)
 logger = logging.getLogger(__name__)
 
 
 def calculate_metrics(noise_case, figdata, c_hsi_Y, row, column, sigma):
-    """Calculate MPSNR, MSSIM, MSAM, MFSIM, and ERGAS metrics for the given two HSIs.
-
-    Returns:
-        tuple: MPSNR values, MSSIM values, noise information, MSAM values, ERGAS values, and MFSIM values.
-    """
+    """Calculate MPSNR, MSSIM, MSAM, MFSIM, and ERGAS metrics for the given two HSIs."""
     psnr_values = []
     mssim_values = []
     sam_values = []
@@ -32,7 +28,7 @@ def calculate_metrics(noise_case, figdata, c_hsi_Y, row, column, sigma):
             psnr_fig = MPSNR(figdata[:, :, i], c_hsi_Y)
             info_noise = 'Case 2: Additive Gaussian non-i.i.d. noise'
         mssim_fig = MSSIM(figdata[:, :, i], c_hsi_Y, row, column)
-        sam_fig = SAM(figdata[:, :, i], c_hsi_Y)
+        sam_fig = MSAM(figdata[:, :, i], c_hsi_Y)
         ergas_fig = ERGAS(figdata[:, :, i], c_hsi_Y, row, column)
         mfsim_fig = MFSIM(figdata[:, :, i], c_hsi_Y, row, column)
         psnr_values.append(psnr_fig)

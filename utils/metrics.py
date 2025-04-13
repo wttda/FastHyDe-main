@@ -1,6 +1,7 @@
 import torch
 import numpy as np
-from .fsim import FSIM
+from .fsim import FeatureSIM
+from sklearn.metrics import mean_squared_error
 from scipy.signal import convolve2d
 from scipy.ndimage import gaussian_filter
 
@@ -107,63 +108,35 @@ def MPSNR_case3(Y, Y_ref):
     return k
 
 
-def SAM(Y, Y_ref, eps=2.2204e-16):
+def MSAM(Y, Y_ref, eps=2.2204e-16):
     """Calculate the Spectral Angle Mapper (SAM) between two HSIs."""
     assert Y.ndim == 2 and Y.shape == Y_ref.shape
     Y = Y.T
     Y_ref = Y_ref.T
-    core = np.multiply(Y, Y_ref)
-    mole = np.sum(core, axis=1)
-    im1_norm = np.sqrt(np.sum(np.square(Y), axis=1))
-    im2_norm = np.sqrt(np.sum(np.square(Y_ref), axis=1))
-    deno = np.multiply(im1_norm, im2_norm)
-    sam = np.rad2deg(np.arccos(((mole + eps) / (deno + eps)).clip(-1, 1)))
+    dot_product = np.sum(Y * Y_ref, axis=1)
+    norm_Y = np.linalg.norm(Y, axis=1)
+    norm_Y_ref = np.linalg.norm(Y_ref, axis=1)
+    cos_angle = (dot_product + eps) / ((norm_Y * norm_Y_ref) + eps)
+    cos_angle = np.clip(cos_angle, -1, 1)
+    sam = np.rad2deg(np.arccos(cos_angle))
     return np.mean(sam)
 
 
 def ERGAS(Y, Y_ref, row, column):
     """Calculate the Error Relative Global Dimensionless Synthesis (ERGAS) between two HSIs."""
-    assert Y.ndim == 2 and Y.shape == Y_ref.shape
+    assert Y.ndim == 2 and Y.shape == Y_ref.shape, "Input arrays must be 2D and of the same shape"
     band, _ = Y_ref.shape
-    ergas_numerator = 0
-    for i in range(band):
-        ref_band = Y_ref[i, :].reshape(row, column)
-        pro_band = Y[i, :].reshape(row, column)
-        mse = np.mean((ref_band - pro_band) ** 2)
-        N = np.std(ref_band)
-        if N == 0:
-            ergas_numerator += 0  # 如果标准差为零，跳过该波段
-        else:
-            ergas_numerator += mse / (N ** 2)
+    Y_3d = Y.reshape(band, row, column)
+    Y_ref_3d = Y_ref.reshape(band, row, column)
+    ergas_numerator = sum(mean_squared_error(Y_ref_3d[i], Y_3d[i]) / (np.mean(Y_ref_3d[i]) ** 2) for i in range(band))
     ergas = 100 * np.sqrt(ergas_numerator / band)
     return ergas
 
 
 def MFSIM(Y, Y_ref, row, column):
-    """Calculate the Mean Fusion Structural Similarity Index (MFSIM) between two HSIs.
-
-    Parameters:
-        Y (numpy.ndarray): Array of shape (band, row * column).
-        Y_ref (numpy.ndarray): Reference array of shape (band, row * column).
-        row (int): Number of rows in the HSI.
-        column (int): Number of columns in the HSI.
-
-    Returns:
-        float: Mean Fusion Structural Similarity Index.
-    """
+    """Calculate the Mean Fusion Structural Similarity Index (MFSIM) between two HSIs."""
     assert Y.ndim == 2 and Y.shape == Y_ref.shape
     band, _ = Y.shape
-    fsims = []
-    FSIM_loss = FSIM()
-    for i in range(band):
-        ref_band = Y_ref[i, :].reshape(row, column)
-        Y_i = Y[i, :].reshape(row, column)
-        img1 = torch.from_numpy(ref_band).float().unsqueeze(0).unsqueeze(0)
-        img2 = torch.from_numpy(Y_i).float().unsqueeze(0).unsqueeze(0)
-        if torch.cuda.is_available():
-            img1 = img1.cuda()
-            img2 = img2.cuda()
-        fsim_value = FSIM_loss(img1, img2)
-        fsims.append(fsim_value.item())
+    fsims = [FeatureSIM(Y_ref[i, :].reshape(row, column), Y[i, :].reshape(row, column)).item() for i in range(band)]
     return np.mean(fsims)
 

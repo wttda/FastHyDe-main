@@ -2,7 +2,7 @@ import logging
 import imageio
 import numpy as np
 import matplotlib.pyplot as plt
-from utils import mkdir
+from utils import mkdir, normalize_img
 logger = logging.getLogger(__name__)
 font = {'family': 'serif',
         'serif': 'Times New Roman',
@@ -72,7 +72,16 @@ def imshow(images, titles=None, cbar=False, figsize=(18, 6), axis=False, save_pa
 def fig_in_paper(cfg, d_hsi_Y, row, column):
     """Plot and save images for a specific band and create GIF animations for the entire HSI."""
     noise_level_str = str(cfg.datasets.noise_level).replace('.', '')
-    case_dir = f'case1_{noise_level_str}' if cfg.datasets.noise_case == 'case1' else 'case2'
+    if cfg.datasets.noise_case == 'case1':
+        case_dir = f'case1_{noise_level_str}'
+    elif cfg.datasets.noise_case == 'case2':
+        case_dir = 'case2'
+    elif cfg.datasets.noise_case == 'case3':
+        case_dir = 'case3'
+        for i in range(d_hsi_Y.shape[0]):
+            d_hsi_Y[i] = normalize_img(d_hsi_Y[i])
+    else:
+        raise ValueError('The noise case is not supported.')
     save_dir = f'{cfg.paper_fig_save_dir}/{cfg.datasets.scene_name}/{case_dir}'
     mkdir(save_dir)
 

@@ -1,434 +1,283 @@
-import torch as pt
-import torch.nn as nn
-from torch import optim
-from torch.autograd import Variable
-import torch.nn.functional as FUN
-
 import numpy as np
-import math
-import imageio
-from scipy.io import loadmat
-
-'''
-This code is a direct pytorch implementation of the original FSIM code provided by
-Lin ZHANG, Lei Zhang, Xuanqin Mou and David Zhang in Matlab. For the original version
-please see: 
-
-https://www4.comp.polyu.edu.hk/~cslzhang/IQA/FSIM/FSIM.htm
-
-'''
+from scipy import ndimage
+from scipy import signal
+from scipy.fft import fft2, ifft2, fftshift, ifftshift
+import cv2
 
 
-class FSIM_base(nn.Module):
+def FeatureSIM(imageRef, imageDis):
+    # Convert images to double
+    imageRef = np.double(imageRef)
+    imageDis = np.double(imageDis)
 
-    def __init__(self):
-        nn.Module.__init__(self)
-        self.cuda_computation = False
-        self.nscale = 4 # Number of wavelet scales
-        self.norient = 4 # Number of filter orientations
-        self.k = 2.0 # No of standard deviations of the noise
-                     # energy beyond the mean at which we set the
-                     # noise threshold point. 
-                     # below which phase congruency values get
-                     # penalized.
+    # Check if images are in [0, 1] range and convert to [0, 255]
+    if imageRef.max() <= 1.0 and imageRef.min() >= 0.0:
+        imageRef = imageRef * 255.0
+        imageDis = imageDis * 255.0
 
-        self.epsilon = .0001 # Used to prevent division by zero
-        self.pi = math.pi
-        
-        minWaveLength = 6  # Wavelength of smallest scale filter
-        mult = 2  # Scaling factor between successive filters
-        sigmaOnf = 0.55 # Ratio of the standard deviation of the
-                        # Gaussian describing the log Gabor filter's
-                        # transfer function in the frequency domain
-                        # to the filter center frequency.    
-        dThetaOnSigma = 1.2 # Ratio of angular interval between filter orientations    
-                            # and the standard deviation of the angular Gaussian
-                            # function used to construct filters in the
-                            # freq. plane.
-        
-        self.thetaSigma = self.pi/self.norient/dThetaOnSigma # Calculate the standard deviation of the
-                                                             # angular Gaussian function used to
-                                                             # construct filters in the freq. plane.
-        
+    # Convert to grayscale if color images
+    if len(imageRef.shape) == 3:
+        Y1 = 0.299 * imageRef[:, :, 0] + 0.587 * imageRef[:, :, 1] + 0.114 * imageRef[:, :, 2]
+        Y2 = 0.299 * imageDis[:, :, 0] + 0.587 * imageDis[:, :, 1] + 0.114 * imageDis[:, :, 2]
+    else:
+        Y1 = imageRef
+        Y2 = imageDis
 
-        self.fo = (1.0/(minWaveLength*pt.pow(mult,(pt.arange(0,self.nscale,dtype=pt.float64))))).unsqueeze(0) # Centre frequency of filter
-        self.den = 2*(math.log(sigmaOnf))**2
-        self.dx = -pt.tensor([[[[3, 0, -3], [10, 0,-10], [3,0,-3]]]])/16.0
-        self.dy = -pt.tensor([[[[3, 10, 3], [0, 0, 0],   [-3 ,-10, -3]]]])/16.0
-        self.T1 = 0.85
-        self.T2 = 160
-        self.T3 = 200;
-        self.T4 = 200;
-        self.lambdac = 0.03
+    # Downsample the image
+    minDimension = min(Y1.shape)
+    F = max(1, round(minDimension / 256))
+    aveKernel = np.ones((F, F)) / (F * F)
 
-    def set_arrays_to_cuda(self):
-        self.cuda_computation = True
-        self.fo = self.fo.cuda()
-        self.dx = self.dx.cuda()
-        self.dy = self.dy.cuda()
-    
-    def forward_gradloss(self,imgr,imgd):
-        I1,Q1,Y1 = self.process_image_channels(imgr)
-        I2,Q2,Y2 = self.process_image_channels(imgd)
+    Y1 = signal.convolve2d(Y1, aveKernel, mode='same')
+    Y2 = signal.convolve2d(Y2, aveKernel, mode='same')
+    Y1 = Y1[::F, ::F]
+    Y2 = Y2[::F, ::F]
 
-        
-        #PCSimMatrix,PCm = self.calculate_phase_score(PC1,PC2)
-        gradientMap1 = self.calculate_gradient_map(Y1)
-        gradientMap2 = self.calculate_gradient_map(Y2)
-        
-        gradientSimMatrix = self.calculate_gradient_sim(gradientMap1,gradientMap2)
-        #gradientSimMatrix= gradientSimMatrix.view(PCSimMatrix.size())
-        gradloss = pt.sum(pt.sum(pt.sum(gradientSimMatrix,1),1))
-        return gradloss
-    
-    def calculate_fsim(self,gradientSimMatrix,PCSimMatrix,PCm):
-        SimMatrix = gradientSimMatrix * PCSimMatrix * PCm
-        FSIM = pt.sum(pt.sum(SimMatrix,1),1) / pt.sum(pt.sum(PCm,1),1)
-        return FSIM
+    # Calculate the phase congruency maps
+    PC1 = phasecong2(Y1)
+    PC2 = phasecong2(Y2)
 
-    def calculate_fsimc(self, I1,Q1,I2,Q2,gradientSimMatrix,PCSimMatrix,PCm):
+    # Calculate the gradient map
+    dx = np.array([[3, 0, -3], [10, 0, -10], [3, 0, -3]]) / 16
+    dy = np.array([[3, 10, 3], [0, 0, 0], [-3, -10, -3]]) / 16
 
-        ISimMatrix = (2*I1*I2 + self.T3) / (pt.pow(I1,2) + pt.pow(I2,2) + self.T3)
-        QSimMatrix = (2*Q1*Q2 + self.T4) / (pt.pow(Q1,2) + pt.pow(Q2,2) + self.T4)
-        SimMatrixC = gradientSimMatrix*PCSimMatrix*(pt.pow(pt.abs(ISimMatrix*QSimMatrix),self.lambdac))*PCm
-        FSIMc = pt.sum(pt.sum(SimMatrixC,1),1)/pt.sum(pt.sum(PCm,1),1)
+    IxY1 = signal.convolve2d(Y1, dx, mode='same')
+    IyY1 = signal.convolve2d(Y1, dy, mode='same')
+    gradientMap1 = np.sqrt(IxY1**2 + IyY1**2)
 
-        return FSIMc
-    
-    def lowpassfilter(self, rows, cols):
-        cutoff = .45
-        n = 15
-        x, y = self.create_meshgrid(cols,rows)
-        radius = pt.sqrt(pt.pow(x,2) + pt.pow(y,2)).unsqueeze(0)       
-        f = self.ifftshift2d( 1 / (1.0 + pt.pow(pt.div(radius,cutoff),2*n)) ) 
-        return f
-    
-    def calculate_gradient_sim(self,gradientMap1,gradientMap2):
+    IxY2 = signal.convolve2d(Y2, dx, mode='same')
+    IyY2 = signal.convolve2d(Y2, dy, mode='same')
+    gradientMap2 = np.sqrt(IxY2**2 + IyY2**2)
 
-        gradientSimMatrix = (2*gradientMap1*gradientMap2 + self.T2) /(pt.pow(gradientMap1,2) + pt.pow(gradientMap2,2) + self.T2)
-        return gradientSimMatrix
+    # Calculate the FSIM
+    T1 = 0.85
+    T2 = 160
+    PCSimMatrix = (2 * PC1 * PC2 + T1) / (PC1**2 + PC2**2 + T1)
+    gradientSimMatrix = (2 * gradientMap1 * gradientMap2 + T2) / (gradientMap1**2 + gradientMap2**2 + T2)
+    PCm = np.maximum(PC1, PC2)
+    SimMatrix = gradientSimMatrix * PCSimMatrix * PCm
+    FSIM = np.sum(SimMatrix) / np.sum(PCm)
 
-    def calculate_gradient_map(self,Y):
-        IxY = FUN.conv2d(Y,self.dx, padding=1)
-        IyY = FUN.conv2d(Y,self.dy, padding=1)
-        gradientMap1 = pt.sqrt(pt.pow(IxY,2) + pt.pow(IyY,2))
-        return gradientMap1
-    
-    def calculate_phase_score(self,PC1,PC2):
-        PCSimMatrix = (2 * PC1 * PC2 + self.T1) / (pt.pow(PC1,2) + pt.pow(PC2,2) + self.T1)
-        PCm = pt.where(PC1>PC2, PC1,PC2)
-        return PCSimMatrix,PCm    
-    
-    def roll_1(self,x, n):  
-        return pt.cat((x[:,-n:,:,:,:], x[:,:-n,:,:,:]), dim=1)        
-        
-    def ifftshift(self,tens,var_axis):
-        len11 = int(tens.size()[var_axis]/2)
-        len12 = tens.size()[var_axis]-len11
-        return pt.cat((tens.narrow(var_axis,len11,len12),tens.narrow(var_axis,0,len11)),axis=var_axis)
+    return FSIM
 
-    def ifftshift2d(self,tens):
-        return self.ifftshift(self.ifftshift(tens,1),2)
+def phasecong2(im):
+    nscale = 4  # Number of wavelet scales.
+    norient = 4  # Number of filter orientations.
+    minWaveLength = 6  # Wavelength of smallest scale filter.
+    mult = 2  # Scaling factor between successive filters.
+    sigmaOnf = 0.55  # Ratio of the standard deviation of the Gaussian describing the log Gabor filter's transfer function in the frequency domain to the filter center frequency.
+    dThetaOnSigma = 1.2  # Ratio of angular interval between filter orientations and the standard deviation of the angular Gaussian function used to construct filters in the freq. plane.
+    k = 2.0  # No of standard deviations of the noise energy beyond the mean at which we set the noise threshold point.
+    epsilon = 0.0001  # Used to prevent division by zero.
 
-    def create_meshgrid(self,cols,rows):
-        '''
-        Set up X and Y matrices with ranges normalised to +/- 0.5
-        The following code adjusts things appropriately for odd and even values
-        of rows and columns.
-        '''
+    thetaSigma = np.pi / norient / dThetaOnSigma  # Calculate the standard deviation of the angular Gaussian function used to construct filters in the freq. plane.
 
-        if cols%2:
-            xrange = pt.arange(start = -(cols-1)/2, end = (cols-1)/2+1, step = 1, requires_grad=False)/(cols-1)
-        else:
-            xrange = pt.arange(-(cols)/2, (cols)/2, step = 1, requires_grad=False)/(cols)
+    rows, cols = im.shape
+    imagefft = fft2(im)  # Fourier transform of image
 
-        if rows%2:
-            yrange = pt.arange(-(rows-1)/2, (rows-1)/2+1, step = 1, requires_grad=False)/(rows-1)
-        else:
-            yrange = pt.arange(-(rows)/2, (rows)/2, step = 1, requires_grad=False)/(rows)
+    zero = np.zeros((rows, cols))
+    EO = np.zeros((nscale, norient), dtype=object)  # Array of convolution results.
 
-        # x, y = pt.meshgrid([xrange, yrange])
-        x, y = pt.meshgrid(xrange, yrange, indexing='xy')
-        
-        if self.cuda_computation:
-            x, y = x.cuda(), y.cuda()
-            
-        return x.T, y.T
+    estMeanE2n = []
+    ifftFilterArray = np.zeros((1, nscale), dtype=object)  # Array of inverse FFTs of filters
 
-    def process_image_channels(self,img):
+    # Pre-compute some stuff to speed up filter construction
 
+    # Set up X and Y matrices with ranges normalised to +/- 0.5
+    # The following code adjusts things appropriately for odd and even values of rows and columns.
+    if cols % 2:
+        xrange = np.arange(-(cols-1)/2, (cols-1)/2+1) / (cols-1)
+    else:
+        xrange = np.arange(-cols/2, cols/2) / cols
 
-        batch, rows, cols = img.shape[0],img.shape[2],img.shape[3]
+    if rows % 2:
+        yrange = np.arange(-(rows-1)/2, (rows-1)/2+1) / (rows-1)
+    else:
+        yrange = np.arange(-rows/2, rows/2) / rows
 
-        minDimension = min(rows,cols)    
+    x, y = np.meshgrid(xrange, yrange)
 
-        Ycoef = pt.tensor([[0.299,0.587,0.114]])
-        Icoef = pt.tensor([[0.596,-0.274,-0.322]])
-        Qcoef = pt.tensor([[0.211,-0.523,0.312]])
-        
-        if self.cuda_computation:
-            Ycoef, Icoef, Qcoef = Ycoef.cuda(), Icoef.cuda(), Qcoef.cuda()
+    radius = np.sqrt(x**2 + y**2)  # Matrix values contain *normalised* radius from centre.
+    theta = np.arctan2(-y, x)  # Matrix values contain polar angle.
+    # (note -ve y is used to give +ve anti-clockwise angles)
 
-        Yfilt=pt.cat(batch*[pt.cat(rows*cols*[Ycoef.unsqueeze(2)],dim=2).view(1,3,rows,cols)],0)
-        Ifilt=pt.cat(batch*[pt.cat(rows*cols*[Icoef.unsqueeze(2)],dim=2).view(1,3,rows,cols)],0)
-        Qfilt=pt.cat(batch*[pt.cat(rows*cols*[Qcoef.unsqueeze(2)],dim=2).view(1,3,rows,cols)],0)
-        
-        # If images have three chanels
-        if img.size()[1]==3:
-            Y = pt.sum(Yfilt*img,1).unsqueeze(1)
-            I = pt.sum(Ifilt*img,1).unsqueeze(1)
-            Q = pt.sum(Qfilt*img,1).unsqueeze(1)
-        else:
-            Y = pt.mean(img,1).unsqueeze(1)
-            I = pt.ones(Y.size(),dtype=pt.float64)
-            Q = pt.ones(Y.size(),dtype=pt.float64)
+    radius = ifftshift(radius)  # Quadrant shift radius and theta so that filters
+    theta = ifftshift(theta)  # are constructed with 0 frequency at the corners.
+    radius[0, 0] = 1  # Get rid of the 0 radius value at the 0 frequency point (now at top-left corner)
+    # so that taking the log of the radius will not cause trouble.
 
-        F = max(1,round(minDimension / 256))
+    sintheta = np.sin(theta)
+    costheta = np.cos(theta)
+    # clear x; clear y; clear theta;    # save a little memory
 
-        aveKernel = nn.AvgPool2d(kernel_size = F, stride = F, padding =0)# max(0, math.floor(F/2)))
-        if self.cuda_computation:
-            aveKernel = aveKernel.cuda()
-            
-        # Make sure that the dimension of the returned image is the same as the input
-        I = aveKernel(I)
-        Q = aveKernel(Q)
-        Y = aveKernel(Y)
-        return I,Q,Y
+    # Filters are constructed in terms of two components.
+    # 1) The radial component, which controls the frequency band that the filter
+    #    responds to
+    # 2) The angular component, which controls the orientation that the filter
+    #    responds to.
+    # The two components are multiplied together to construct the overall filter.
 
-        
-    def phasecong2(self,img):
-        '''
-        % Filters are constructed in terms of two components.
-        % 1) The radial component, which controls the frequency band that the filter
-        %    responds to
-        % 2) The angular component, which controls the orientation that the filter
-        %    responds to.
-        % The two components are multiplied together to construct the overall filter.
+    # Construct the radial filter components...
 
-        % Construct the radial filter components...
+    # First construct a low-pass filter that is as large as possible, yet falls
+    # away to zero at the boundaries.  All log Gabor filters are multiplied by
+    # this to ensure no extra frequencies at the 'corners' of the FFT are
+    # incorporated as this seems to upset the normalisation process when
+    # calculating phase congrunecy.
+    lp = lowpassfilter((rows, cols), 0.45, 15)  # Radius .45, 'sharpness' 15
 
-        % First construct a low-pass filter that is as large as possible, yet falls
-        % away to zero at the boundaries.  All log Gabor filters are multiplied by
-        % this to ensure no extra frequencies at the 'corners' of the FFT are
-        % incorporated as this seems to upset the normalisation process when
-        % calculating phase congrunecy.
-        '''
+    logGabor = np.zeros((1, nscale), dtype=object)
 
-        batch, rows, cols = img.shape[0],img.shape[2],img.shape[3]
+    for s in range(nscale):
+        wavelength = minWaveLength * (mult ** s)
+        fo = 1.0 / wavelength  # Centre frequency of filter.
+        logGabor[0, s] = np.exp((-(np.log(radius / fo))**2) / (2 * (np.log(sigmaOnf))**2))
+        logGabor[0, s] = logGabor[0, s] * lp  # Apply low-pass filter
+        logGabor[0, s][0, 0] = 0  # Set the value at the 0 frequency point of the filter
+        # back to zero (undo the radius fudge).
 
-        # imagefft = pt.rfft(img,signal_ndim=2,onesided=False)
-        imagefft = pt.fft.fft2(img, dim=(-2, -1))
-        imagefft = pt.stack((imagefft.real, imagefft.imag), dim=-1)
-        x, y = self.create_meshgrid(cols,rows)
+    # Then construct the angular filter components...
 
-        radius = pt.cat(batch*[pt.sqrt(pt.pow(x,2) + pt.pow(y,2)).unsqueeze(0)],0)
-        theta = pt.cat(batch*[pt.atan2(-y,x).unsqueeze(0)],0)
+    spread = np.zeros((1, norient), dtype=object)
 
-        radius = self.ifftshift2d(radius) # Matrix values contain *normalised* radius from centre
-        theta  = self.ifftshift2d(theta) # Matrix values contain polar angle.
-                                         # (note -ve y is used to give +ve
-                                         # anti-clockwise angles)
-
-        radius[:,0,0] = 1 
-        
-        sintheta = pt.sin(theta)
-        costheta = pt.cos(theta)
-
-        lp = self.lowpassfilter(rows,cols) # Radius .45, 'sharpness' 15
-        lp = pt.cat(batch*[lp.unsqueeze(0)],0)
- 
-        term1 = pt.cat(rows*cols*[self.fo.unsqueeze(2)],dim=2).view(-1,self.nscale,rows,cols)
-        term1 = pt.cat(batch*[term1.unsqueeze(0)],0).view(-1,self.nscale,rows,cols)
-
-        term2 = pt.log(pt.cat(self.nscale*[radius.unsqueeze(1)],1)/term1)
-        #  Apply low-pass filter    
-        logGabor = pt.exp(-pt.pow(term2,2)/self.den)
-        logGabor = logGabor*lp
-        logGabor[:,:,0,0] = 0 # Set the value at the 0 frequency point of the filter
-                              # back to zero (undo the radius fudge).
-
-        # Then construct the angular filter components...
+    for o in range(norient):
+        angl = (o) * np.pi / norient  # Filter angle.
 
         # For each point in the filter matrix calculate the angular distance from
         # the specified filter orientation.  To overcome the angular wrap-around
         # problem sine difference and cosine difference values are first computed
         # and then the atan2 function is used to determine angular distance.
-        angl = pt.arange(0,self.norient,dtype=pt.float64)/self.norient*self.pi
 
-        if self.cuda_computation:
-            angl = angl.cuda()
-        ds_t1 = pt.cat(self.norient*[sintheta.unsqueeze(1)],1)*pt.cos(angl).view(-1,self.norient,1,1)
-        ds_t2 = pt.cat(self.norient*[costheta.unsqueeze(1)],1)*pt.sin(angl).view(-1,self.norient,1,1)
-        dc_t1 = pt.cat(self.norient*[costheta.unsqueeze(1)],1)*pt.cos(angl).view(-1,self.norient,1,1)
-        dc_t2 = pt.cat(self.norient*[sintheta.unsqueeze(1)],1)*pt.sin(angl).view(-1,self.norient,1,1)
-        ds = ds_t1-ds_t2 # Difference in sine.
-        dc = dc_t1+dc_t2 # Difference in cosine.
-        dtheta = pt.abs(pt.atan2(ds,dc)) # Absolute angular distance.
-        spread = pt.exp(-pt.pow(dtheta,2)/(2*self.thetaSigma**2)) # Calculate the
-                                                                  # angular filter component.
+        ds = sintheta * np.cos(angl) - costheta * np.sin(angl)  # Difference in sine.
+        dc = costheta * np.cos(angl) + sintheta * np.sin(angl)  # Difference in cosine.
+        dtheta = np.abs(np.arctan2(ds, dc))  # Absolute angular distance.
+        spread[0, o] = np.exp(-(dtheta**2) / (2 * thetaSigma**2))  # Calculate the angular filter component.
 
-        logGabor_rep = pt.repeat_interleave(logGabor,self.norient,1).view(-1,self.nscale,self.norient,rows,cols)
+    # The main loop...
+    EnergyAll = np.zeros((rows, cols))
+    AnAll = np.zeros((rows, cols))
 
-        # Batch size, scale, orientation, pixels, pixels
-        spread_rep = pt.cat(self.nscale*[spread]).view(-1,self.nscale,self.norient,rows,cols)
-        filter_log_spread = logGabor_rep*spread_rep
-        array_of_zeros = pt.zeros(filter_log_spread.unsqueeze(5).size(),dtype=pt.float64)
-        if self.cuda_computation:
-            array_of_zeros = array_of_zeros.cuda()
-        filter_log_spread_zero = pt.cat((filter_log_spread.unsqueeze(5),array_of_zeros), dim=5)
-        # ifftFilterArray = pt.ifft(filter_log_spread_zero,signal_ndim =2).select(5,0)*math.sqrt(rows*cols)
-        # 将实部和虚部分开
-        real_part = filter_log_spread_zero[..., 0]
-        imaginary_part = filter_log_spread_zero[..., 1]
+    for o in range(norient):  # For each orientation.
+        sumE_ThisOrient = zero  # Initialize accumulator matrices.
+        sumO_ThisOrient = zero
+        sumAn_ThisOrient = zero
+        Energy = zero
 
-        # 创建复数张量
-        complex_tensor = pt.complex(real_part, imaginary_part)
+        for s in range(nscale):  # For each scale.
+            filter = logGabor[0, s] * spread[0, o]  # Multiply radial and angular components to get the filter.
+            ifftFilt = np.real(ifft2(filter)) * np.sqrt(rows * cols)  # Note rescaling to match power
+            ifftFilterArray[0, s] = ifftFilt  # record ifft2 of filter
+            # Convolve image with even and odd filters returning the result in EO
+            EO[s, o] = ifft2(imagefft * filter)
 
-        # 使用 torch.fft.ifft2 进行逆变换
-        ifft_result = pt.fft.ifft2(complex_tensor, dim=(-2, -1))
+            An = np.abs(EO[s, o])  # Amplitude of even & odd filter response.
+            sumAn_ThisOrient = sumAn_ThisOrient + An  # Sum of amplitude responses.
+            sumE_ThisOrient = sumE_ThisOrient + np.real(EO[s, o])  # Sum of even filter convolution results.
+            sumO_ThisOrient = sumO_ThisOrient + np.imag(EO[s, o])  # Sum of odd filter convolution results.
+            if s == 0:  # Record mean squared filter value at smallest scale. This is used for noise estimation.
+                EM_n = np.sum(filter**2)
+                maxAn = An  # Record the maximum An over all scales.
+            else:
+                maxAn = np.maximum(maxAn, An)
 
-        # 取实部并乘以缩放因子
-        ifftFilterArray = ifft_result.real * math.sqrt(rows * cols)
-
-        imagefft_repeat = pt.cat(self.nscale*self.norient*[imagefft],dim=1).view(-1,self.nscale,self.norient,rows,cols,2)
-        filter_log_spread_repeat = pt.cat(2*[filter_log_spread.unsqueeze(5)],dim=5)
-        # Convolve image with even and odd filters returning the result in EO
-        # EO = pt.ifft(filter_log_spread_repeat*imagefft_repeat,signal_ndim=2)
-        # 将实部和虚部分开
-        real_part = (filter_log_spread_repeat[..., 0] * imagefft_repeat[..., 0]) - (
-                    filter_log_spread_repeat[..., 1] * imagefft_repeat[..., 1])
-        imaginary_part = (filter_log_spread_repeat[..., 0] * imagefft_repeat[..., 1]) + (
-                    filter_log_spread_repeat[..., 1] * imagefft_repeat[..., 0])
-
-        # 创建复数张量
-        complex_tensor = pt.complex(real_part, imaginary_part)
-
-        # 使用 torch.fft.ifft2 进行逆变换
-        EO = pt.fft.ifft2(complex_tensor, dim=(-2, -1))
-        # 直接从 EO 中提取实部和虚部
-        E = EO.real
-        O = EO.imag
-        # E = EO.select(5, 0)
-        # O = EO.select(5, 1)
-        An = pt.sqrt(pt.pow(E,2)+pt.pow(O,2))
-        sumAn_ThisOrient = pt.sum(An,1)
-        sumE_ThisOrient = pt.sum(E,1) # Sum of even filter convolution results
-        sumO_ThisOrient = pt.sum(O,1) # Sum of odd filter convolution results.
-
-        # Get weighted mean filter response vector, this gives the weighted mean
-        # phase angle.
-        XEnergy = pt.sqrt(pt.pow(sumE_ThisOrient,2) + pt.pow(sumO_ThisOrient,2)) + self.epsilon
+        # Get weighted mean filter response vector, this gives the weighted mean phase angle.
+        XEnergy = np.sqrt(sumE_ThisOrient**2 + sumO_ThisOrient**2) + epsilon
         MeanE = sumE_ThisOrient / XEnergy
         MeanO = sumO_ThisOrient / XEnergy
-        
-        MeanO = pt.cat(self.nscale*[MeanO.unsqueeze(1)],1)
-        MeanE = pt.cat(self.nscale*[MeanE.unsqueeze(1)],1)
 
+        # Now calculate An(cos(phase_deviation) - | sin(phase_deviation)) | by using dot and cross products
+        # between the weighted mean filter response vector and the individual filter response vectors at each scale.
+        # This quantity is phase congruency multiplied by An, which we call energy.
+        for s in range(nscale):
+            E = np.real(EO[s, o])
+            O = np.imag(EO[s, o])  # Extract even and odd convolution results.
+            Energy = Energy + E * MeanE + O * MeanO - np.abs(E * MeanO - O * MeanE)
 
-        # Now calculate An(cos(phase_deviation) - | sin(phase_deviation)) | by
-        # using dot and cross products between the weighted mean filter response
-        # vector and the individual filter response vectors at each scale.  This
-        # quantity is phase congruency multiplied by An, which we call energy.
-        Energy = pt.sum( E*MeanE+O*MeanO - pt.abs(E*MeanO-O*MeanE),1)
-        abs_EO  = pt.sqrt(pt.pow(E,2) + pt.pow(O,2))
-
-        #   % Compensate for noise
-        # We estimate the noise power from the energy squared response at the
-        # smallest scale.  If the noise is Gaussian the energy squared will have a
-        # Chi-squared 2DOF pdf.  We calculate the median energy squared response
+        # Compensate for noise
+        # We estimate the noise power from the energy squared response at the smallest scale.  If the noise is Gaussian
+        # the energy squared will have a Chi-squared 2DOF pdf.  We calculate the median energy squared response
         # as this is a robust statistic.  From this we estimate the mean.
-        # The estimate of noise power is obtained by dividing the mean squared
-        # energy value by the mean squared filter value
-        medianE2n = pt.pow(abs_EO.select(1,0),2).view(-1,self.norient,rows*cols).median(2).values
+        # The estimate of noise power is obtained by dividing the mean squared energy value by the mean squared filter value
 
-        EM_n = pt.sum(pt.sum(pt.pow(filter_log_spread.select(1,0),2),3),2)
-        noisePower = -(medianE2n/math.log(0.5))/EM_n
-        
+        medianE2n = np.median(np.abs(EO[0, o])**2)
+        meanE2n = -medianE2n / np.log(0.5)
+        estMeanE2n.append(meanE2n)
+
+        noisePower = meanE2n / EM_n  # Estimate of noise power.
+
         # Now estimate the total energy^2 due to noise
         # Estimate for sum(An^2) + sum(Ai.*Aj.*(cphi.*cphj + sphi.*sphj))
-        EstSumAn2 = pt.sum(pt.pow(ifftFilterArray,2),1)
 
-        sumEstSumAn2 = pt.sum(pt.sum(EstSumAn2,2),2)
-        roll_t1 = ifftFilterArray*self.roll_1(ifftFilterArray,1)
-        roll_t2 = ifftFilterArray*self.roll_1(ifftFilterArray,2)
-        roll_t3 = ifftFilterArray*self.roll_1(ifftFilterArray,3)
-        rolling_mult = roll_t1+roll_t2+roll_t3
-        EstSumAiAj = pt.sum(rolling_mult,1)/2
-        sumEstSumAiAj = pt.sum(pt.sum(EstSumAiAj,2),2)
+        EstSumAn2 = zero
+        for s in range(nscale):
+            EstSumAn2 = EstSumAn2 + ifftFilterArray[0, s]**2
 
-        EstNoiseEnergy2 = 2*noisePower*sumEstSumAn2+4*noisePower*sumEstSumAiAj
-        tau = pt.sqrt(EstNoiseEnergy2/2)
-        EstNoiseEnergy = tau*math.sqrt(self.pi/2)
-        EstNoiseEnergySigma = pt.sqrt( (2-self.pi/2)*pt.pow(tau,2))
+        EstSumAiAj = zero
+        for si in range(nscale - 1):
+            for sj in range(si + 1, nscale):
+                EstSumAiAj = EstSumAiAj + ifftFilterArray[0, si] * ifftFilterArray[0, sj]
 
+        sumEstSumAn2 = np.sum(EstSumAn2)
+        sumEstSumAiAj = np.sum(EstSumAiAj)
 
-        # The estimated noise effect calculated above is only valid for the PC_1 measure. 
+        EstNoiseEnergy2 = 2 * noisePower * sumEstSumAn2 + 4 * noisePower * sumEstSumAiAj
+
+        tau = np.sqrt(EstNoiseEnergy2 / 2)  # Rayleigh parameter
+        EstNoiseEnergy = tau * np.sqrt(np.pi / 2)  # Expected value of noise energy
+        EstNoiseEnergySigma = np.sqrt((2 - np.pi / 2) * tau**2)
+
+        T = EstNoiseEnergy + k * EstNoiseEnergySigma  # Noise threshold
+
+        # The estimated noise effect calculated above is only valid for the PC_1 measure.
         # The PC_2 measure does not lend itself readily to the same analysis.  However
-        # empirically it seems that the noise effect is overestimated roughly by a factor 
+        # empirically it seems that the noise effect is overestimated roughly by a factor
         # of 1.7 for the filter parameters used here.
-        T = (EstNoiseEnergy + self.k*EstNoiseEnergySigma)/1.7 # Noise threshold
-        
-        T_exp = pt.cat(rows*cols*[T.unsqueeze(2)],dim=2).view(-1,self.norient,rows,cols)
-        AnAll = pt.sum(sumAn_ThisOrient,1)
-        array_of_zeros_energy = pt.zeros(Energy.size(),dtype=pt.float64)
-        if self.cuda_computation:
-            array_of_zeros_energy =array_of_zeros_energy.cuda()
-            
-        EnergyAll = pt.sum(pt.where((Energy - T_exp)<0.0, array_of_zeros_energy,Energy - T_exp ),1)
-        ResultPC = EnergyAll/AnAll
-        
-        return ResultPC
-    
-class FSIM(FSIM_base):
-    '''
-    Note, the input is expected to be from 0 to 255
-    '''
 
-    def __init__(self):
-        super().__init__()
-        
-    def forward(self,imgr,imgd):
-        if imgr.is_cuda:
-            self.set_arrays_to_cuda()
-            
-        I1,Q1,Y1 = self.process_image_channels(imgr)
-        I2,Q2,Y2 = self.process_image_channels(imgd)
-        PC1 = self.phasecong2(Y1)
-        PC2 = self.phasecong2(Y2)
-        
-        PCSimMatrix,PCm = self.calculate_phase_score(PC1,PC2)
-        gradientMap1 = self.calculate_gradient_map(Y1)
-        gradientMap2 = self.calculate_gradient_map(Y2)
-        
-        gradientSimMatrix = self.calculate_gradient_sim(gradientMap1,gradientMap2)
-        gradientSimMatrix= gradientSimMatrix.view(PCSimMatrix.size())
-        FSIM = self.calculate_fsim(gradientSimMatrix,PCSimMatrix,PCm)
+        T = T / 1.7  # Empirical rescaling of the estimated noise effect to suit the PC_2 phase congruency measure
+        Energy = np.maximum(Energy - T, zero)  # Apply noise threshold
 
-        return FSIM.mean()
+        EnergyAll = EnergyAll + Energy
+        AnAll = AnAll + sumAn_ThisOrient
 
-class FSIMc(FSIM_base, nn.Module):
-    '''
-    Note, the input is expected to be from 0 to 255
-    '''
-    def __init__(self):
-        super().__init__()
-        
-    def forward(self,imgr,imgd):
-        if imgr.is_cuda:
-            self.set_arrays_to_cuda()
-            
-            
-        I1,Q1,Y1 = self.process_image_channels(imgr)
-        I2,Q2,Y2 = self.process_image_channels(imgd)
-        PC1 = self.phasecong2(Y1)
-        PC2 = self.phasecong2(Y2)
-        
-        PCSimMatrix,PCm = self.calculate_phase_score(PC1,PC2)
-        gradientMap1 = self.calculate_gradient_map(Y1)
-        gradientMap2 = self.calculate_gradient_map(Y2)
-        
-        gradientSimMatrix = self.calculate_gradient_sim(gradientMap1,gradientMap2)
-        gradientSimMatrix= gradientSimMatrix.view(PCSimMatrix.size())
-        FSIMc = self.calculate_fsimc(I1.squeeze(),Q1.squeeze(),I2.squeeze(),Q2.squeeze(),gradientSimMatrix,PCSimMatrix,PCm)
+    ResultPC = EnergyAll / AnAll
+    return ResultPC
 
-        return FSIMc.mean()
+def lowpassfilter(sze, cutoff, n):
+    if cutoff < 0 or cutoff > 0.5:
+        raise ValueError('cutoff frequency must be between 0 and 0.5')
+    if n % 1 != 0 or n < 1:
+        raise ValueError('n must be an integer >= 1')
+
+    rows, cols = sze
+    if cols % 2:
+        xrange = np.arange(-(cols-1)/2, (cols-1)/2+1) / (cols-1)
+    else:
+        xrange = np.arange(-cols/2, cols/2) / cols
+
+    if rows % 2:
+        yrange = np.arange(-(rows-1)/2, (rows-1)/2+1) / (rows-1)
+    else:
+        yrange = np.arange(-rows/2, rows/2) / rows
+
+    x, y = np.meshgrid(xrange, yrange)
+    radius = np.sqrt(x**2 + y**2)
+    f = 1 / (1 + (radius / cutoff)**(2 * n))
+    return np.fft.ifftshift(f)
+
+# Example usage
+if __name__ == "__main__":
+    # Load images (replace with your image paths)
+    imageRef = cv2.imread('Noisy.jpg', cv2.IMREAD_GRAYSCALE)
+    imageDis = cv2.imread('TNN.jpg', cv2.IMREAD_GRAYSCALE)
+
+    # Ensure images are of the same size
+    if imageRef.shape != imageDis.shape:
+        imageDis = cv2.resize(imageDis, (imageRef.shape[1], imageRef.shape[0]))
+
+    # Normalize images to [0, 1]
+    imageRef = imageRef / 255.0
+    imageDis = imageDis / 255.0
+
+    # Compute FSIM
+    fsim = FeatureSIM(imageRef, imageDis)
+    print(f"FSIM: {fsim}")

@@ -9,7 +9,7 @@ from easydict import EasyDict
 from .add_noise import add_noise
 from .save_data import metrics_data_in_paper, mkdir
 from .utils_image import load_clean_HSI, normalize_img
-from .metrics import MSSIM, MPSNR, MPSNR_case3, SAM, ERGAS, MFSIM
+from .metrics import MSSIM, MPSNR, MPSNR_case3, MSAM, ERGAS, MFSIM
 
 
 def set_seed(seed=0):
