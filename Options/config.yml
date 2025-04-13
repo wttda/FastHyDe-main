@@ -8,7 +8,7 @@ p_subspace: 10
 datasets:
   scene_name: pavia #WashingtonDC, pavia
   HSI_dir: ../Datasets/
-  noise_case: case2
+  noise_case: case1
   noise_level: 0.1 #0.1, 0.08, 0.06, 0.04, 0.02
 
 # save and show
